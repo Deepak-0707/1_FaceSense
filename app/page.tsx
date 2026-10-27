@@ -71,6 +71,27 @@ type TrackedFace = {
   recentBlinks: number[];
   blinkRate: number;
   lastSeen: number;
+  // Prolonged stress tracking
+  stressHighSince: number | null;
+  stressDurationSec: number;
+  isCalmAlertActive: boolean;
+};
+
+type CalmAlertDetails = {
+  faceId: number;
+  stressPct: number;
+  durationSec: number;
+  thresholdPct: number;
+  thresholdSec: number;
+  timestamp: number;
+};
+
+type StressProgress = {
+  active: boolean;
+  durationSec: number;
+  thresholdSec: number;
+  stressPct: number;
+  faceId: number;
 };
 
 type TrainLabel = "relaxed" | "stressed";
@@ -272,9 +293,26 @@ export default function FaceSensePage() {
   const [userId, setUserId] = useState<string>("");
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>("default");
 
+  // Prolonged Stress & Calm Reminder State & Controls
+  const [stressThresholdPct, setStressThresholdPct] = useState<number>(65);
+  const [stressDurationThresholdSec, setStressDurationThresholdSec] = useState<number>(8);
+  const [soundAlertMode, setSoundAlertMode] = useState<"chime" | "beep" | "mute">("chime");
+  const [voiceAlertEnabled, setVoiceAlertEnabled] = useState<boolean>(true);
+  const [showSettingsPanel, setShowSettingsPanel] = useState<boolean>(false);
+  const [showBreathingGuide, setShowBreathingGuide] = useState<boolean>(false);
+  const [calmAlertDetails, setCalmAlertDetails] = useState<CalmAlertDetails | null>(null);
+  const [stressProgress, setStressProgress] = useState<StressProgress | null>(null);
+  const [calmRestoredMsg, setCalmRestoredMsg] = useState<string | null>(null);
+
+  // Sync refs for uninterrupted access in inference/draw loops
+  const stressThresholdPctRef = useRef(65);
+  const stressDurationThresholdSecRef = useRef(8);
+  const soundAlertModeRef = useRef<"chime" | "beep" | "mute">("chime");
+  const voiceAlertEnabledRef = useRef(true);
+
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
-  // ── Initialise user identity ─
+  // ── Initialise user identity & settings ─
   useEffect(() => {
     const id = getOrCreateUserId();
     userIdRef.current = id;
@@ -288,6 +326,40 @@ export default function FaceSensePage() {
           setNotifPermission(perm);
         });
       }
+    }
+
+    // Load persisted threshold & alert preferences
+    try {
+      const savedThresh = localStorage.getItem("facesense_stress_threshold");
+      if (savedThresh) {
+        const val = Number(savedThresh);
+        if (!isNaN(val) && val >= 30 && val <= 95) {
+          setStressThresholdPct(val);
+          stressThresholdPctRef.current = val;
+          stressThresholdRef.current = val / 100;
+        }
+      }
+      const savedDuration = localStorage.getItem("facesense_duration_threshold");
+      if (savedDuration) {
+        const val = Number(savedDuration);
+        if (!isNaN(val) && val >= 2 && val <= 60) {
+          setStressDurationThresholdSec(val);
+          stressDurationThresholdSecRef.current = val;
+        }
+      }
+      const savedSound = localStorage.getItem("facesense_sound_mode");
+      if (savedSound === "chime" || savedSound === "beep" || savedSound === "mute") {
+        setSoundAlertMode(savedSound);
+        soundAlertModeRef.current = savedSound;
+      }
+      const savedVoice = localStorage.getItem("facesense_voice_alert");
+      if (savedVoice !== null) {
+        const val = savedVoice === "true";
+        setVoiceAlertEnabled(val);
+        voiceAlertEnabledRef.current = val;
+      }
+    } catch {
+      // offline / private mode
     }
 
     // Try to load user's KNN model from backend
@@ -312,6 +384,69 @@ export default function FaceSensePage() {
         }
       })
       .catch(() => {/* offline — use fallbacks */ });
+  }, []);
+
+  // Setting update handlers with localStorage sync
+  const updateStressThreshold = useCallback((val: number) => {
+    setStressThresholdPct(val);
+    stressThresholdPctRef.current = val;
+    stressThresholdRef.current = val / 100;
+    try {
+      localStorage.setItem("facesense_stress_threshold", String(val));
+    } catch { }
+  }, []);
+
+  const updateDurationThreshold = useCallback((val: number) => {
+    setStressDurationThresholdSec(val);
+    stressDurationThresholdSecRef.current = val;
+    try {
+      localStorage.setItem("facesense_duration_threshold", String(val));
+    } catch { }
+  }, []);
+
+  const updateSoundMode = useCallback((val: "chime" | "beep" | "mute") => {
+    setSoundAlertMode(val);
+    soundAlertModeRef.current = val;
+    try {
+      localStorage.setItem("facesense_sound_mode", val);
+    } catch { }
+  }, []);
+
+  const updateVoiceAlert = useCallback((val: boolean) => {
+    setVoiceAlertEnabled(val);
+    voiceAlertEnabledRef.current = val;
+    try {
+      localStorage.setItem("facesense_voice_alert", String(val));
+    } catch { }
+  }, []);
+
+  const triggerTestCalmAlert = useCallback(() => {
+    const testDetails: CalmAlertDetails = {
+      faceId: 1,
+      stressPct: 82,
+      durationSec: stressDurationThresholdSecRef.current,
+      thresholdPct: stressThresholdPctRef.current,
+      thresholdSec: stressDurationThresholdSecRef.current,
+      timestamp: Date.now(),
+    };
+    setAlertStress(true);
+    setCalmAlertDetails(testDetails);
+    setShowBreathingGuide(true);
+
+    if (soundAlertModeRef.current === "chime") {
+      playCalmChime();
+    } else if (soundAlertModeRef.current === "beep") {
+      playBeep(880, 0.3);
+    }
+
+    if (voiceAlertEnabledRef.current) {
+      speakCalmReminder("Please take a deep breath and stay calm.");
+    }
+
+    sendBrowserNotification(
+      "🌿 FaceSense: Reminder to Be Calm (Test)",
+      "This is a demonstration alert reminding you to take a deep breath and stay calm."
+    );
   }, []);
 
   // ── Load models ──
@@ -381,6 +516,8 @@ export default function FaceSensePage() {
       latestTrackedFacesRef.current = [];
       setMultiFaceSummaries([]);
       setCalibProgress(0);
+      setStressProgress(null);
+      setCalmAlertDetails(null);
 
       isRunningRef.current = true;
       setStatus("calibrating");
@@ -432,6 +569,9 @@ export default function FaceSensePage() {
     alertBlinkRef.current = false;
     setAlertStress(false); setAlertBlink(false);
     setCalibProgress(0);
+    setStressProgress(null);
+    setCalmAlertDetails(null);
+    setShowBreathingGuide(false);
     setStatus("idle"); setErrorMsg("");
   }, []);
 
@@ -575,6 +715,9 @@ export default function FaceSensePage() {
               recentBlinks: [],
               blinkRate: 0,
               lastSeen: nowMs,
+              stressHighSince: null,
+              stressDurationSec: 0,
+              isCalmAlertActive: false,
             };
             existingMap.set(newId, tracker);
           }
@@ -593,12 +736,34 @@ export default function FaceSensePage() {
           tracker.dominantEmotion = dom;
           tracker.stressScore = stress;
           tracker.stressPct = Math.round(stress * 100);
+
+          const currentThreshPct = stressThresholdPctRef.current;
           tracker.stressColor =
-            tracker.stressPct >= Math.round(stressThresholdRef.current * 100)
+            tracker.isCalmAlertActive
+              ? "#00f5d4"
+              : tracker.stressPct >= currentThreshPct
               ? "#ef4444"
               : tracker.stressPct >= 40
               ? "#f97316"
               : "#22c55e";
+
+          // Prolonged stress tracking per face
+          if (tracker.stressPct >= currentThreshPct) {
+            if (tracker.stressHighSince === null) {
+              tracker.stressHighSince = nowMs;
+            }
+            tracker.stressDurationSec = Math.round(((nowMs - tracker.stressHighSince) / 1000) * 10) / 10;
+          } else {
+            if (tracker.stressHighSince !== null && tracker.isCalmAlertActive) {
+              setCalmRestoredMsg(
+                `Face #${tracker.id} returned to calm state (${tracker.stressPct}% < ${currentThreshPct}%). Great job!`
+              );
+              setTimeout(() => setCalmRestoredMsg(null), 6000);
+            }
+            tracker.stressHighSince = null;
+            tracker.stressDurationSec = 0;
+            tracker.isCalmAlertActive = false;
+          }
 
           // Per-face EAR & Blink detection
           if (face.landmarks) {
@@ -724,35 +889,95 @@ export default function FaceSensePage() {
             });
           }
 
-          // Alerts with cooldown
-          const stressThresh = stressThresholdRef.current;
+          // Alerts with threshold and duration check
+          const targetDurationSec = stressDurationThresholdSecRef.current;
+          const targetThreshPct = stressThresholdPctRef.current;
           const blinkThresh = blinkThresholdRef.current;
           const cooldownOk = nowMs - lastAlertTimeRef.current >= ALERT_COOLDOWN_MS;
 
-          if (primary.stressScore > stressThresh) {
-            if (stressHighSinceRef.current === null) stressHighSinceRef.current = nowMs;
-            if (nowMs - stressHighSinceRef.current > 10000 && !alertFiredRef.current && cooldownOk) {
+          // Find if any face has sustained stress >= targetDurationSec
+          const prolongedFace = updatedTrackedFaces.find(
+            (f) => f.stressDurationSec >= targetDurationSec
+          );
+
+          if (prolongedFace) {
+            prolongedFace.isCalmAlertActive = true;
+            setAlertStress(true);
+
+            if (!alertFiredRef.current && cooldownOk) {
               alertFiredRef.current = true;
               lastAlertTimeRef.current = nowMs;
-              setAlertStress(true);
-              playBeep(880, 0.3);
+
+              const alertInfo: CalmAlertDetails = {
+                faceId: prolongedFace.id,
+                stressPct: prolongedFace.stressPct,
+                durationSec: prolongedFace.stressDurationSec,
+                thresholdPct: targetThreshPct,
+                thresholdSec: targetDurationSec,
+                timestamp: nowMs,
+              };
+              setCalmAlertDetails(alertInfo);
+              setShowBreathingGuide(true);
+              setStressProgress(null);
+
+              // Soothing chime sound
+              if (soundAlertModeRef.current === "chime") {
+                playCalmChime();
+              } else if (soundAlertModeRef.current === "beep") {
+                playBeep(880, 0.3);
+              }
+
+              // Spoken voice reminder
+              if (voiceAlertEnabledRef.current) {
+                const label = updatedTrackedFaces.length > 1 ? `Face number ${prolongedFace.id}` : "You";
+                speakCalmReminder(`${label}, please take a deep breath and stay calm.`);
+              }
+
+              // Browser system push notification
               sendBrowserNotification(
-                "⚠ High Stress Detected",
-                "Sustained high stress for 10+ seconds. Take a short break."
+                "🌿 FaceSense: Reminder to Be Calm",
+                `High stress (${prolongedFace.stressPct}%) sustained for ${prolongedFace.stressDurationSec}s. Take a slow deep breath and relax.`
               );
+
+              // Persist alert to backend
               persistAlert(
                 BACKEND_URL,
                 userIdRef.current,
                 sessionIdRef.current,
                 "stress",
-                primary.stressScore,
-                primary.blinkRate
+                prolongedFace.stressScore,
+                prolongedFace.blinkRate,
+                prolongedFace.stressDurationSec,
+                `High stress for ${prolongedFace.stressDurationSec}s (Threshold: ${targetThreshPct}%) — Reminder to be calm`
               );
             }
           } else {
-            stressHighSinceRef.current = null;
-            alertFiredRef.current = false;
-            setAlertStress(false);
+            // Check if any face has elevated stress accumulating towards duration threshold
+            const maxElevated = updatedTrackedFaces.reduce<TrackedFace | null>((best, f) => {
+              if (f.stressDurationSec > 0 && (!best || f.stressDurationSec > best.stressDurationSec)) {
+                return f;
+              }
+              return best;
+            }, null);
+
+            if (maxElevated && maxElevated.stressDurationSec >= 1.5) {
+              setStressProgress({
+                active: true,
+                faceId: maxElevated.id,
+                durationSec: maxElevated.stressDurationSec,
+                thresholdSec: targetDurationSec,
+                stressPct: maxElevated.stressPct,
+              });
+            } else {
+              setStressProgress(null);
+            }
+
+            // Check if all faces have calmed down
+            const anyStressHigh = updatedTrackedFaces.some((f) => f.stressHighSince !== null);
+            if (!anyStressHigh) {
+              setAlertStress(false);
+              alertFiredRef.current = false;
+            }
           }
 
           const elapsed30s = nowMs - blinkStartTimeRef.current > 30000;
@@ -883,15 +1108,23 @@ export default function FaceSensePage() {
         const score = face.score;
 
         // Bounding box border and glow
-        ctx.strokeStyle = face.stressColor;
-        ctx.lineWidth = 2;
-        ctx.shadowColor = face.stressColor;
-        ctx.shadowBlur = 10;
-        ctx.strokeRect(box.x, box.y, box.width, box.height);
-        ctx.shadowBlur = 0;
-
-        // Glowing corners
-        drawCorners(ctx, box.x, box.y, box.width, box.height, 16, face.stressColor);
+        if (face.isCalmAlertActive) {
+          ctx.strokeStyle = "#00f5d4";
+          ctx.lineWidth = 3;
+          ctx.shadowColor = "#00f5d4";
+          ctx.shadowBlur = 18;
+          ctx.strokeRect(box.x, box.y, box.width, box.height);
+          ctx.shadowBlur = 0;
+          drawCorners(ctx, box.x, box.y, box.width, box.height, 16, "#00f5d4");
+        } else {
+          ctx.strokeStyle = face.stressColor;
+          ctx.lineWidth = 2;
+          ctx.shadowColor = face.stressColor;
+          ctx.shadowBlur = 10;
+          ctx.strokeRect(box.x, box.y, box.width, box.height);
+          ctx.shadowBlur = 0;
+          drawCorners(ctx, box.x, box.y, box.width, box.height, 16, face.stressColor);
+        }
 
         // Facial landmarks
         const pts = face.landmarks.positions;
@@ -914,25 +1147,46 @@ export default function FaceSensePage() {
 
         const screenBoxLeft = canvas.width - box.x - box.width;
         const screenBoxWidth = box.width;
-        const cardWidth = Math.max(screenBoxWidth, 230);
-        const cardHeight = 46;
+        const cardWidth = Math.max(screenBoxWidth, 240);
+        const cardHeight = 48;
         const cardX = Math.max(
           8,
           Math.min(canvas.width - cardWidth - 8, screenBoxLeft + (screenBoxWidth - cardWidth) / 2)
         );
-        const cardY = box.y >= 54 ? box.y - 50 : box.y + 6;
+        const cardY = box.y >= 56 ? box.y - 52 : box.y + 6;
+
+        // If face is in active Calm Alert or elevated, draw a top reminder pill
+        if (face.isCalmAlertActive) {
+          drawRoundedRect(ctx, cardX, cardY - 20, cardWidth, 18, 4);
+          ctx.fillStyle = "#00f5d4";
+          ctx.fill();
+          ctx.font = "bold 10px monospace";
+          ctx.fillStyle = "#0a0a0f";
+          ctx.fillText("🌿 REMINDER: BE CALM · BREATHE", cardX + 8, cardY - 7);
+        } else if (face.stressDurationSec >= 1.5) {
+          drawRoundedRect(ctx, cardX, cardY - 18, cardWidth, 16, 4);
+          ctx.fillStyle = "rgba(249, 115, 22, 0.95)";
+          ctx.fill();
+          ctx.font = "bold 9px monospace";
+          ctx.fillStyle = "#0a0a0f";
+          ctx.fillText(
+            `⏱ ELEVATED: ${face.stressDurationSec}s / ${stressDurationThresholdSecRef.current}s`,
+            cardX + 8,
+            cardY - 6
+          );
+        }
 
         // HUD Background Card
         drawRoundedRect(ctx, cardX, cardY, cardWidth, cardHeight, 6);
-        ctx.fillStyle = "rgba(10, 12, 20, 0.90)";
+        ctx.fillStyle = face.isCalmAlertActive ? "rgba(10, 28, 24, 0.94)" : "rgba(10, 12, 20, 0.90)";
         ctx.fill();
-        ctx.strokeStyle = face.stressColor + "aa";
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = face.isCalmAlertActive ? "#00f5d4" : face.stressColor + "aa";
+        ctx.lineWidth = face.isCalmAlertActive ? 2 : 1.5;
         ctx.stroke();
 
         // Row 1: Face #, Dominant Emotion & Emoji, Confidence
         ctx.font = "bold 11px monospace";
-        ctx.fillStyle = "#00f5d4";
+        ctx.fillStyle = face.isCalmAlertActive ? "#00f5d4" : "#00f5d4";
         ctx.fillText(`FACE #${face.id}`, cardX + 8, cardY + 17);
 
         const emEmoji = EMOTION_EMOJI[face.dominantEmotion] ?? "😐";
@@ -948,14 +1202,19 @@ export default function FaceSensePage() {
 
         // Row 2: Stress level & Blink rate
         ctx.font = "bold 11px monospace";
-        ctx.fillStyle = face.stressColor;
+        ctx.fillStyle = face.isCalmAlertActive ? "#00f5d4" : face.stressColor;
         const stressText = `STRESS: ${face.stressPct}%`;
         ctx.fillText(stressText, cardX + 8, cardY + 36);
 
-        const stressTag =
-          face.stressPct >= 70 ? "HIGH" : face.stressPct >= 40 ? "MOD" : "CALM";
+        const stressTag = face.isCalmAlertActive
+          ? "BE CALM"
+          : face.stressPct >= stressThresholdPctRef.current
+          ? "HIGH"
+          : face.stressPct >= 40
+          ? "MOD"
+          : "CALM";
         ctx.font = "9px monospace";
-        ctx.fillStyle = face.stressColor + "aa";
+        ctx.fillStyle = face.isCalmAlertActive ? "#00f5d4" : face.stressColor + "aa";
         ctx.fillText(`[${stressTag}]`, cardX + 8 + ctx.measureText(stressText).width + 4, cardY + 36);
 
         // Blink rate
@@ -1065,21 +1324,124 @@ export default function FaceSensePage() {
         </div>
       )}
 
-      {/* Alerts */}
-      {(alertStress || alertBlink) && (
-        <div className="mb-4 w-full max-w-5xl flex flex-col gap-2">
-          {alertStress && (
-            <div className="flex items-center gap-3 bg-red-950/60 border border-red-500/50 rounded-lg px-4 py-3 text-red-400 text-sm font-mono animate-pulse">
-              <span className="text-lg">⚠</span>
-              <span>HIGH STRESS DETECTED — sustained stress for 10+ seconds. Take a break.</span>
+      {/* Calm Restored Toast */}
+      {calmRestoredMsg && (
+        <div className="mb-4 w-full max-w-5xl flex items-center justify-between gap-3 bg-emerald-950/80 border border-emerald-500/50 rounded-xl px-4 py-3 text-emerald-300 text-sm font-mono shadow-[0_0_20px_rgba(16,185,129,0.2)] animate-pulse">
+          <div className="flex items-center gap-3">
+            <span className="text-xl">🌿</span>
+            <span className="font-semibold">{calmRestoredMsg}</span>
+          </div>
+          <button
+            onClick={() => setCalmRestoredMsg(null)}
+            className="text-emerald-400 hover:text-white text-xs px-2 py-1 rounded"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Elevated Stress Accumulation Progress */}
+      {stressProgress && !alertStress && (
+        <div className="mb-4 w-full max-w-5xl bg-amber-950/40 border border-amber-500/50 rounded-xl p-3 flex flex-col gap-1.5 backdrop-blur-sm shadow-[0_0_25px_rgba(245,158,11,0.15)]">
+          <div className="flex items-center justify-between text-xs font-mono">
+            <div className="flex items-center gap-2 text-amber-300">
+              <span className="animate-spin text-sm">⏳</span>
+              <span>
+                <strong>Face #{stressProgress.faceId}</strong> elevated stress ({stressProgress.stressPct}% ≥ {stressThresholdPct}%)
+              </span>
             </div>
-          )}
-          {alertBlink && (
-            <div className="flex items-center gap-3 bg-amber-950/60 border border-amber-500/50 rounded-lg px-4 py-3 text-amber-400 text-sm font-mono">
-              <span className="text-lg">👁</span>
-              <span>LOW BLINK RATE ({blinkRate}/min) — blink more often to reduce eye strain.</span>
+            <span className="text-amber-400 font-bold tabular-nums">
+              {stressProgress.durationSec.toFixed(1)}s / {stressProgress.thresholdSec}s until Calm Alert
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-amber-500 to-red-500 transition-all duration-150"
+              style={{
+                width: `${Math.min(100, (stressProgress.durationSec / stressProgress.thresholdSec) * 100)}%`,
+              }}
+            />
+          </div>
+          <p className="text-[10px] font-mono text-zinc-400">
+            Slow down your breathing — if stress drops below {stressThresholdPct}%, this timer resets.
+          </p>
+        </div>
+      )}
+
+      {/* Prolonged Stress & Calm Reminder Alert */}
+      {alertStress && (
+        <div className="mb-4 w-full max-w-5xl bg-gradient-to-r from-emerald-950/90 via-zinc-900/95 to-cyan-950/90 border-2 border-[#00f5d4] rounded-2xl p-5 shadow-[0_0_50px_rgba(0,245,212,0.25)] relative overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-400 via-[#00f5d4] to-cyan-400 animate-pulse" />
+
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-[#00f5d4]/10 border border-[#00f5d4]/40 flex items-center justify-center text-2xl flex-shrink-0 animate-bounce">
+                🌿
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 uppercase tracking-wider">
+                    Reminder to Be Calm
+                  </span>
+                  {calmAlertDetails && (
+                    <span className="text-xs font-mono text-zinc-400">
+                      Face #{calmAlertDetails.faceId} · Elevated for {calmAlertDetails.durationSec}s
+                    </span>
+                  )}
+                </div>
+                <h2 className="text-xl font-bold font-mono text-white mt-1">
+                  Please Take a Deep Breath and Stay Calm
+                </h2>
+                <p className="text-xs font-mono text-zinc-300 mt-1 max-w-2xl leading-relaxed">
+                  Your stress level ({stressPct}%) has exceeded your threshold ({stressThresholdPct}%) for longer than {stressDurationThresholdSec} seconds. Lower your shoulders, relax your facial muscles, and take slow, calm breaths.
+                </p>
+              </div>
             </div>
+
+            <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
+              <button
+                onClick={() => setShowBreathingGuide((prev) => !prev)}
+                className="px-4 py-2 rounded-xl text-xs font-mono font-bold bg-[#00f5d4] text-[#0a0a0f] hover:bg-[#00f5d4]/80 transition-all shadow-[0_0_20px_rgba(0,245,212,0.3)] flex items-center gap-1.5"
+              >
+                <span>🧘</span>
+                <span>{showBreathingGuide ? "Hide Breathing Guide" : "Guided Breathing"}</span>
+              </button>
+              <button
+                onClick={() => {
+                  playCalmChime();
+                  if (voiceAlertEnabled) speakCalmReminder();
+                }}
+                title="Play soothing chime & voice reminder"
+                className="px-3 py-2 rounded-xl text-xs font-mono border border-zinc-700 bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-all flex items-center gap-1.5"
+              >
+                <span>🔔</span>
+                <span>Chime</span>
+              </button>
+              <button
+                onClick={() => {
+                  setAlertStress(false);
+                  setCalmAlertDetails(null);
+                  setShowBreathingGuide(false);
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-mono border border-zinc-700 bg-zinc-800/80 text-zinc-400 hover:text-white transition-all"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+
+          {/* Interactive Guided Box Breathing */}
+          {showBreathingGuide && (
+            <GuidedBreathingWidget currentStress={stressPct} targetThreshold={stressThresholdPct} />
           )}
+        </div>
+      )}
+
+      {/* Blink Alert */}
+      {alertBlink && (
+        <div className="mb-4 w-full max-w-5xl flex items-center gap-3 bg-amber-950/60 border border-amber-500/50 rounded-lg px-4 py-3 text-amber-400 text-sm font-mono">
+          <span className="text-lg">👁</span>
+          <span>LOW BLINK RATE ({blinkRate}/min) — blink more often to reduce eye strain.</span>
         </div>
       )}
 
@@ -1403,7 +1765,7 @@ export default function FaceSensePage() {
       )}
 
       {/* Buttons */}
-      <div className="mt-6 flex gap-4">
+      <div className="mt-6 flex flex-wrap gap-4 items-center justify-center">
         {!isRunning && (
           <button
             onClick={startCamera}
@@ -1421,7 +1783,179 @@ export default function FaceSensePage() {
             ■ Stop Camera
           </button>
         )}
+
+        {/* Calm Alert Settings Toggle Button */}
+        <button
+          onClick={() => setShowSettingsPanel((prev) => !prev)}
+          className={`px-5 py-3 rounded-lg font-mono text-sm tracking-wider uppercase border transition-all duration-150 flex items-center gap-2 ${
+            showSettingsPanel
+              ? "bg-[#00f5d4]/20 border-[#00f5d4] text-[#00f5d4] shadow-[0_0_18px_rgba(0,245,212,0.25)]"
+              : "bg-zinc-900 border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white"
+          }`}
+        >
+          <span>⚙</span>
+          <span>Calm Alert Settings</span>
+          <span className="text-xs text-zinc-500 font-normal">({stressThresholdPct}% / {stressDurationThresholdSec}s)</span>
+        </button>
+
+        {/* Quick Test Alert Button */}
+        <button
+          onClick={triggerTestCalmAlert}
+          title="Simulate a prolonged stress alert to test chime, speech, and popup"
+          className="px-4 py-3 rounded-lg font-mono text-sm tracking-wider uppercase border border-zinc-700 bg-zinc-900/80 text-zinc-400 hover:text-[#00f5d4] hover:border-[#00f5d4]/40 transition-all flex items-center gap-1.5"
+        >
+          <span>🔔</span>
+          <span>Test Alert</span>
+        </button>
       </div>
+
+      {/* Calm Alert Settings Panel */}
+      {showSettingsPanel && (
+        <div className="mt-4 w-full max-w-2xl bg-zinc-900/90 border border-zinc-700/80 rounded-2xl p-6 shadow-2xl backdrop-blur-md">
+          <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-4">
+            <div className="flex items-center gap-2.5">
+              <span className="text-lg">⚙</span>
+              <h3 className="text-sm font-bold font-mono uppercase tracking-wider text-white">
+                Prolonged Stress &amp; Calm Alert Thresholds
+              </h3>
+            </div>
+            <button
+              onClick={() => setShowSettingsPanel(false)}
+              className="text-zinc-500 hover:text-zinc-300 text-xs font-mono"
+            >
+              ✕ Close
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-5">
+            {/* Stress Threshold Slider & Presets */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-mono text-zinc-300 font-semibold">
+                  Stress Level Threshold: <span className="text-[#00f5d4] font-bold text-sm">{stressThresholdPct}%</span>
+                </label>
+                <span className="text-[10px] font-mono text-zinc-500">Alert triggers when stress &ge; this value</span>
+              </div>
+              <input
+                type="range"
+                min="40"
+                max="90"
+                step="5"
+                value={stressThresholdPct}
+                onChange={(e) => updateStressThreshold(Number(e.target.value))}
+                className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#00f5d4]"
+              />
+              <div className="flex flex-wrap gap-2 mt-2.5">
+                {[
+                  { label: "Sensitive (50%)", val: 50 },
+                  { label: "Standard (65%)", val: 65 },
+                  { label: "High Only (80%)", val: 80 },
+                ].map(({ label, val }) => (
+                  <button
+                    key={val}
+                    onClick={() => updateStressThreshold(val)}
+                    className={`px-2.5 py-1 rounded text-xs font-mono border transition-all ${
+                      stressThresholdPct === val
+                        ? "bg-[#00f5d4]/20 border-[#00f5d4] text-[#00f5d4] font-bold"
+                        : "bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                {baseline && (
+                  <button
+                    onClick={() => updateStressThreshold(Math.min(90, Math.round(baseline.avgStress * 100) + 20))}
+                    className="px-2.5 py-1 rounded text-xs font-mono border border-purple-500/40 bg-purple-950/30 text-purple-300 hover:bg-purple-900/40 transition-all"
+                  >
+                    ⚡ Use Calibrated Baseline ({Math.min(90, Math.round(baseline.avgStress * 100) + 20)}%)
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Duration Threshold */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-mono text-zinc-300 font-semibold">
+                  Sustained Duration Threshold: <span className="text-amber-400 font-bold text-sm">{stressDurationThresholdSec} seconds</span>
+                </label>
+                <span className="text-[10px] font-mono text-zinc-500">Time stress must continuously stay elevated</span>
+              </div>
+              <div className="grid grid-cols-6 gap-2">
+                {[5, 8, 10, 15, 20, 30].map((sec) => (
+                  <button
+                    key={sec}
+                    onClick={() => updateDurationThreshold(sec)}
+                    className={`py-1.5 rounded-lg text-xs font-mono font-bold border transition-all text-center ${
+                      stressDurationThresholdSec === sec
+                        ? "bg-amber-500/20 border-amber-400 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.2)]"
+                        : "bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    {sec}s
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Audio & Voice options */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-zinc-800">
+              <div>
+                <label className="text-xs font-mono text-zinc-300 font-semibold block mb-2">
+                  Alert Sound Mode
+                </label>
+                <div className="flex gap-2">
+                  {[
+                    { label: "🌿 Calm Chime", mode: "chime" as const },
+                    { label: "⚠ Beep", mode: "beep" as const },
+                    { label: "🔇 Mute", mode: "mute" as const },
+                  ].map(({ label, mode }) => (
+                    <button
+                      key={mode}
+                      onClick={() => updateSoundMode(mode)}
+                      className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-mono border transition-all text-center ${
+                        soundAlertMode === mode
+                          ? "bg-[#00f5d4]/20 border-[#00f5d4] text-[#00f5d4] font-bold"
+                          : "bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-mono text-zinc-300 font-semibold block mb-2">
+                  Voice Calm Guidance
+                </label>
+                <label className="flex items-center gap-2.5 cursor-pointer bg-zinc-800/60 border border-zinc-700 rounded-lg px-3 py-1.5">
+                  <input
+                    type="checkbox"
+                    checked={voiceAlertEnabled}
+                    onChange={(e) => updateVoiceAlert(e.target.checked)}
+                    className="w-4 h-4 rounded border-zinc-600 accent-[#00f5d4] cursor-pointer"
+                  />
+                  <span className="text-xs font-mono text-zinc-300">
+                    Spoken voice: &quot;Please take a deep breath and stay calm&quot;
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-zinc-800/60 text-[11px] font-mono text-zinc-500">
+              <span>Settings automatically saved to browser storage.</span>
+              <button
+                onClick={triggerTestCalmAlert}
+                className="text-[#00f5d4] hover:underline font-semibold"
+              >
+                ▶ Test Alert Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Info cards */}
       <div className="mt-10 grid grid-cols-2 sm:grid-cols-4 gap-3 w-full max-w-2xl text-center">
@@ -1479,16 +2013,67 @@ async function persistAlert(
   sessionId: string,
   type: "stress" | "fatigue",
   stressScore: number,
-  blinkRate: number
+  blinkRate: number,
+  durationSec: number = 0,
+  message: string = ""
 ) {
   try {
     await fetch(`${backendUrl}/api/alerts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, sessionId, type, stressScore, blinkRate }),
+      body: JSON.stringify({ userId, sessionId, type, stressScore, blinkRate, durationSec, message }),
     });
   } catch {
     // offline — alerts not persisted this time
+  }
+}
+
+//  Soothing harmonic chime for relaxation (Web Audio API)
+function playCalmChime() {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const now = ctx.currentTime;
+
+    // Harmonic Solfeggio 528Hz calming meditation chord:
+    const freqs = [528, 792, 1056];
+    const gains = [0.35, 0.18, 0.09];
+
+    freqs.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, now);
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(gains[idx], now + 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 2.3);
+    });
+  } catch {
+    // AudioContext blocked
+  }
+}
+
+//  Spoken voice reminder using Web Speech API
+function speakCalmReminder(message = "Please take a deep breath and stay calm.") {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.rate = 0.88;
+    utterance.pitch = 1.0;
+    utterance.volume = 0.85;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    // Speech synthesis error
   }
 }
 
@@ -1508,6 +2093,107 @@ function playBeep(freq = 880, duration = 0.2) {
   } catch {
     // AudioContext not available
   }
+}
+
+//  Interactive Guided Box Breathing Widget (4-4-4-4)
+function GuidedBreathingWidget({
+  currentStress,
+  targetThreshold,
+}: {
+  currentStress: number;
+  targetThreshold: number;
+}) {
+  const [phaseIndex, setPhaseIndex] = useState(0); // 0: Inhale, 1: Hold, 2: Exhale, 3: Rest
+  const [secondsLeft, setSecondsLeft] = useState(4);
+
+  const PHASES = [
+    { name: "Inhale Slowly", duration: 4, instruction: "Breathe in deeply through your nose", color: "#00f5d4" },
+    { name: "Hold Gently", duration: 4, instruction: "Gently hold your breath, relax shoulders", color: "#38bdf8" },
+    { name: "Exhale Slowly", duration: 4, instruction: "Release breath smoothly through mouth", color: "#a855f7" },
+    { name: "Rest & Be Calm", duration: 4, instruction: "Stay peaceful and centered", color: "#22c55e" },
+  ];
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          setPhaseIndex((p) => (p + 1) % PHASES.length);
+          return 4;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [PHASES.length]);
+
+  const currentPhase = PHASES[phaseIndex];
+  const isRecovered = currentStress < targetThreshold;
+
+  return (
+    <div className="mt-4 pt-4 border-t border-zinc-800/80 flex flex-col md:flex-row items-center justify-between gap-6">
+      <div className="flex items-center gap-5">
+        {/* Animated breathing circle */}
+        <div className="relative w-24 h-24 flex items-center justify-center flex-shrink-0">
+          <div
+            className={`absolute inset-0 rounded-full transition-all duration-1000 ${
+              phaseIndex === 0
+                ? "scale-100 bg-[#00f5d4]/20 border-2 border-[#00f5d4] shadow-[0_0_24px_rgba(0,245,212,0.4)]"
+                : phaseIndex === 1
+                ? "scale-100 bg-sky-500/20 border-2 border-sky-400 shadow-[0_0_24px_rgba(56,189,248,0.4)] animate-pulse"
+                : phaseIndex === 2
+                ? "scale-75 bg-purple-500/20 border-2 border-purple-400 shadow-[0_0_20px_rgba(168,85,247,0.3)]"
+                : "scale-70 bg-emerald-500/10 border-2 border-emerald-400 shadow-[0_0_15px_rgba(34,197,94,0.3)]"
+            }`}
+          />
+          <span className="relative z-10 text-2xl font-black font-mono" style={{ color: currentPhase.color }}>
+            {secondsLeft}s
+          </span>
+        </div>
+
+        <div>
+          <span
+            className="text-[10px] font-mono font-bold uppercase tracking-widest px-2 py-0.5 rounded border"
+            style={{
+              color: currentPhase.color,
+              borderColor: currentPhase.color + "50",
+              backgroundColor: currentPhase.color + "15",
+            }}
+          >
+            Phase {phaseIndex + 1}/4 · {currentPhase.name}
+          </span>
+          <p className="text-sm font-mono font-bold text-white mt-1">{currentPhase.instruction}</p>
+          <p className="text-xs font-mono text-zinc-400 mt-0.5">
+            Box Breathing (4-4-4-4): Resets nervous system and reduces heart rate during prolonged stress.
+          </p>
+        </div>
+      </div>
+
+      {/* Real-time stress monitor */}
+      <div className="bg-zinc-950/80 border border-zinc-800 rounded-xl p-3 flex flex-col gap-1 min-w-[210px] text-right">
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
+          Live Stress Level
+        </span>
+        <div className="flex items-center justify-end gap-2">
+          <span
+            className="text-2xl font-mono font-black"
+            style={{ color: isRecovered ? "#22c55e" : "#ef4444" }}
+          >
+            {currentStress}%
+          </span>
+          <span className="text-xs font-mono text-zinc-500">/ threshold &lt;{targetThreshold}%</span>
+        </div>
+        {isRecovered ? (
+          <span className="text-[11px] font-mono text-emerald-400 font-semibold">
+            ✓ Calm restored! Keep breathing.
+          </span>
+        ) : (
+          <span className="text-[11px] font-mono text-amber-400">
+            Elevated — breathe slowly...
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 //  Canvas helpers 

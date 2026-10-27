@@ -28,6 +28,15 @@ const AlertSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+    durationSec: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    message: {
+      type: String,
+      default: "",
+    },
     timestamp: {
       type: Date,
       default: Date.now,

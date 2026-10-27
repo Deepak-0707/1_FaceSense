@@ -71,6 +71,8 @@ type AlertItem = {
   type: "stress" | "fatigue";
   stressScore: number;
   blinkRate: number;
+  durationSec?: number;
+  message?: string;
   timestamp: string;
   sessionId: string;
 };
@@ -547,14 +549,14 @@ export default function DashboardPage() {
                       : "bg-amber-950/30 border-amber-500/20 text-amber-400"
                       }`}
                   >
-                    <span className="text-base mt-0.5">{a.type === "stress" ? "⚠" : "👁"}</span>
+                    <span className="text-base mt-0.5">{a.type === "stress" ? "🌿" : "👁"}</span>
                     <div className="flex-1 min-w-0">
                       <p className="font-bold uppercase tracking-widest text-[10px]">
-                        {a.type === "stress" ? "High Stress" : "Low Blink Rate"}
+                        {a.type === "stress" ? "High Stress (Calm Reminder)" : "Low Blink Rate"}
                       </p>
                       <p className="text-zinc-500 text-[10px]">
                         {a.type === "stress"
-                          ? `Stress: ${Math.round(a.stressScore * 100)}%`
+                          ? `Stress: ${Math.round(a.stressScore * 100)}%${a.durationSec ? ` · Sustained: ${a.durationSec}s` : ""}${a.message ? ` · ${a.message}` : " · Reminder to be calm"}`
                           : `Blink rate: ${a.blinkRate}/min`}
                       </p>
                     </div>

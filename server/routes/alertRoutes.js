@@ -4,7 +4,7 @@ const Alert = require("../models/Alert");
 
 router.post("/", async (req, res) => {
   try {
-    const { userId, sessionId, type, stressScore, blinkRate } = req.body;
+    const { userId, sessionId, type, stressScore, blinkRate, durationSec, message } = req.body;
 
     if (!userId || typeof userId !== "string" || userId.trim() === "") {
       return res.status(400).json({ error: "userId is required" });
@@ -22,6 +22,8 @@ router.post("/", async (req, res) => {
       type,
       stressScore: Number(stressScore) || 0,
       blinkRate: Number(blinkRate) || 0,
+      durationSec: Number(durationSec) || 0,
+      message: typeof message === "string" ? message.trim() : "",
       timestamp: new Date(),
     });
 
